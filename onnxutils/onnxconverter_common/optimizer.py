@@ -54,7 +54,7 @@ class LinkedNode(object):
     @property
     def broadcast(self):
         return False if self.origin is None else \
-            self.origin.op_type in ['Add', 'Div', 'Max']
+            self.origin.op_type in ['Add', 'Sub', 'Div', 'Mul', 'Max', 'Min']
 
     @property
     def in_single_path_and_inner(self):
@@ -323,9 +323,15 @@ class Solution(object):
         end.precedence[end.precedence.index(begin)] = node
         node.precedence.append(begin)
         node.successor.append(end)
-        node_list.append(node)
 
-        return node_list
+        # re-order the nodelist for topological order
+        new_node_list = []
+        for n in node_list:
+            if n is end:
+                new_node_list.append(node)
+            new_node_list.append(n)
+
+        return new_node_list
 
     def apply(self, node_list):
         node = self.begin_n  # type: LinkedNode
@@ -374,7 +380,18 @@ class MoveForwardSolution(Solution):
         self.end_p.successor[0] = self.begin_n
         self.end.precedence[0] = self.begin_n
         self.begin_n.successor[0] = self.end
-        return node_list
+
+        # re-order the nodelist so that the swapped nodes are in the right order
+        new_node_list = []
+        for node in node_list:
+            if node is self.begin_n:
+                new_node_list.append(self.end_p)
+            elif node is self.end_p:
+                new_node_list.append(self.begin_n)
+            else:
+                new_node_list.append(node)
+
+        return new_node_list
 
 
 class FanOutSolution(Solution):
@@ -383,6 +400,7 @@ class FanOutSolution(Solution):
         cur_perm = Solution.get_perm(self.begin_n.origin)
         # make a copy of self.end_p.successor
         successor_list = list(self.end_p.successor)
+        outp = self.end_p.single_output
 
         for suc in successor_list:
             nnode = LinkedNode(
@@ -393,7 +411,7 @@ class FanOutSolution(Solution):
                     perm=cur_perm,
                     name='TransposeFanOut' + str(FanOutSolution.number)))
             FanOutSolution.number = FanOutSolution.number + 1
-            node_list = Solution.add_siso_node(node_list, self.end_p, suc, list(suc.input.values())[0], nnode)
+            node_list = Solution.add_siso_node(node_list, self.end_p, suc, self.end_p.single_output, nnode)
 
         node_list = Solution.delete_node_1ton(node_list, self.begin, self.begin_n, self.end_p)
         return node_list
@@ -516,8 +534,10 @@ class TransposeOptimizer(object):
         return solution
 
 
-def _find_an_optimization(node_list):
-    optimizers = (RedundantOptimizer, TransposeOptimizer)
+def _find_an_optimization(node_list, optimize_transpose=False):
+    optimizers = (RedundantOptimizer,)
+    if optimize_transpose:
+      optimizers = (RedundantOptimizer, TransposeOptimizer)
 
     for optm in optimizers:
         solution = optm.find(node_list)
@@ -539,7 +559,7 @@ def _build_onnx_model(node_list):
     return regenerated
 
 
-def optimize_onnx(onnx_nodes, nchw_inputs=None, inputs=None, outputs=None):
+def optimize_onnx(onnx_nodes, nchw_inputs=None, inputs=None, outputs=None, optimize_transpose=False):
     """
     Optimize onnx model by several approaches.
     :param onnx_nodes: the onnx node list in onnx model.
@@ -549,19 +569,21 @@ def optimize_onnx(onnx_nodes, nchw_inputs=None, inputs=None, outputs=None):
     :param outputs: the model output
     :return: the optimized onnx node list
     """
+    print("onnxmltools - opt - START2")
+
     node_list = LinkedNode.build_from_onnx(onnx_nodes,
                                            nchw_inputs if nchw_inputs else [],
                                            [] if inputs is None else [i_.name for i_ in inputs],
                                            [] if outputs is None else [o_.name for o_ in outputs])
-    solution = _find_an_optimization(node_list)
+    solution = _find_an_optimization(node_list, optimize_transpose)
     while solution:
         node_list = _apply_optimization(solution, node_list)
-        solution = _find_an_optimization(node_list)
+        solution = _find_an_optimization(node_list, optimize_transpose)
 
     return _build_onnx_model(node_list)
 
 
-def optimize_onnx_model(origin_model, nchw_inputs=None):
+def optimize_onnx_model(origin_model, nchw_inputs=None, optimize_transpose=False):
     """
     the origin model will be updated after the optimization.
     :param origin_model:
@@ -572,9 +594,11 @@ def optimize_onnx_model(origin_model, nchw_inputs=None):
     nodelist = list(graph.node)
     del graph.node[:]
 
+    print("onnxmltools - opt - START")
     all_nodes = optimize_onnx(nodelist,
                               inputs=graph.input,
-                              outputs=graph.output)
+                              outputs=graph.output,
+                              optimize_transpose=optimize_transpose)
     nodes = [n_ for n_ in all_nodes if not isinstance(n_, tuple)]
     graph.node.extend(nodes)
 
